@@ -1,0 +1,2 @@
+[nbdev]
+captum_trial = captum_trial._modidx:d

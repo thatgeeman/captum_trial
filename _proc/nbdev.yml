@@ -1,0 +1,9 @@
+project:
+  output-dir: _docs
+
+website:
+  title: "captum_trial"
+  site-url: "https://thatgeeman.github.io/captum_trial"
+  description: "Test for Captum to visualize learned filters"
+  repo-branch: main
+  repo-url: "https://github.com/thatgeeman/captum_trial"

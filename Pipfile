@@ -1,0 +1,21 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+torch = "*"
+jupyter = "*"
+torchvision = "*"
+matplotlib = "*"
+captum = "*"
+nbdev = "*"
+lightning = "*"
+scikit-learn = "*"
+tensorboard = "*"
+
+[dev-packages]
+captum-trial = {editable = true, path = "."}
+
+[requires]
+python_version = "3.11"
