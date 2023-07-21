@@ -9,6 +9,7 @@ from torch import nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import TQDMProgressBar
+from torchmetrics import AUROC
 from sklearn.metrics import roc_auc_score
 
 from typing import Any, Union, Tuple
@@ -16,7 +17,7 @@ from typing import Any, Union, Tuple
 # %% ../nbs/02_run.ipynb 3
 _size_2_t = Union[int, Tuple[int, int]]
 
-# %% ../nbs/02_run.ipynb 7
+# %% ../nbs/02_run.ipynb 9
 class CIFARLightningModule(pl.LightningModule):
     def __init__(
         self,
@@ -27,17 +28,20 @@ class CIFARLightningModule(pl.LightningModule):
         loss_func=nn.CrossEntropyLoss,
         verbose=True,
         patience=10,
+        num_classes=10,
     ):
-        # x = B 1 5 20 20
         super(CIFARLightningModule, self).__init__()
-        self.model = model
+        self.model = model(n_cls=num_classes)
         self.verbose = verbose
         self.patience = patience
         self.loss_func = loss_func(label_smoothing=0.1)
+        self.train_metric = AUROC(task="multiclass", num_classes=num_classes)
+        self.val_metric = AUROC(task="multiclass", num_classes=num_classes)
         self.lr = lr
         self.wd = wd
         self.train_dls, self.valid_dls = dls
-        # self.flat = nn.Flatten()
+        self.train_step_outputs = []
+        self.val_step_outputs = []
         self.save_hyperparameters(ignore="model")
 
     def forward(self, x):
@@ -45,7 +49,7 @@ class CIFARLightningModule(pl.LightningModule):
 
     def train_dataloader(self):
         return self.train_dls
-    
+
     def val_dataloader(self):
         return self.valid_dls
 
@@ -53,60 +57,115 @@ class CIFARLightningModule(pl.LightningModule):
         images, labels = batch
         logits = self(images)
         acts = F.softmax(logits, dim=-1)
-        preds = acts.argmax(-1).squeeze().cpu()
-        preds_raw = acts.detach().cpu() 
+        preds = acts.argmax(-1).squeeze()
+        pred_proba = acts.detach()
         labels = labels.to(torch.long)
         train_loss = self.loss_func(logits.squeeze(), labels.squeeze())
-        return {
-            "loss": train_loss,
+        score = self.train_metric(pred_proba, labels.squeeze())
+        self.log(
+            "train_score_step",
+            score,
+            on_step=True,
+            on_epoch=False,
+            prog_bar=False,
+            add_dataloader_idx=True,
+            logger=True,
+        )
+        self.log(
+            "train_loss_step",
+            train_loss,
+            on_step=True,
+            on_epoch=False,
+            prog_bar=False,
+            add_dataloader_idx=True,
+            logger=True,
+        )
+        train_logs = {
+            # "loss": train_loss,  # requires 'loss' key
+            "train_loss": train_loss,
             "train_preds_step": preds,
-            "train_preds_raw_step": preds_raw,
+            "train_score_step": score,
+            "train_pred_proba_step": pred_proba,
             "train_labels_step": labels.squeeze().cpu(),
         }
+        self.train_step_outputs.append(train_logs)
+        return train_loss
 
     def validation_step(self, batch, bidx):
         images, labels = batch
         logits = self(images)
         acts = F.softmax(logits, dim=-1)
-        preds = acts.argmax(-1).squeeze().cpu()
-        preds_raw = acts.detach().cpu()  
+        preds = acts.argmax(-1).squeeze()
+        pred_proba = acts.detach()
         labels = labels.to(torch.long)
         valid_loss = self.loss_func(logits.squeeze(), labels.squeeze())
-        return {
-            "valid_loss_step": valid_loss.item(),
+        score = self.val_metric(pred_proba, labels.squeeze())
+        self.log(
+            "valid_score_step",
+            score,
+            on_step=True,
+            on_epoch=False,
+            prog_bar=False,
+            add_dataloader_idx=True,
+            logger=True,
+        )
+        self.log(
+            "valid_loss_step",
+            valid_loss,
+            on_step=True,
+            on_epoch=False,
+            prog_bar=False,
+            add_dataloader_idx=True,
+            logger=True,
+        )
+        val_logs = {
+            "valid_loss": valid_loss,
             "valid_preds_step": preds,
-            "valid_preds_raw_step": preds_raw,
+            "valid_score_step": score,
+            "valid_pred_proba_step": pred_proba,
             "valid_labels_step": labels.squeeze().cpu(),
         }
+        self.val_step_outputs.append(val_logs)
+        return valid_loss
 
-    def on_training_epoch_end(self, outputs):
+    def evaluate_epoch_end(self, outputs, stage):
+        """Custom method to be called to evaluate performance on epoch end"""
+        loss_avg = torch.stack([x[f"{stage}_loss"] for x in outputs]).mean()  # floats
+        # do other evaluations
+        self.log(
+            f"{stage}_loss",
+            loss_avg,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+        )
+
+    def on_training_epoch_end(self):
         # outputs from all training steps
-        preds = []
-        labels = []
-        loss = 0.0
-        for out in outputs:
-            preds.extend(list(out["train_preds_raw_step"]))
-            labels.extend(list(out["train_labels_step"]))
-            loss += out["loss"] / len(outputs)
-        train_score = self.scorer(labels, preds)
-        self.log("train_score", train_score, on_step=False, on_epoch=True)
-        self.log("train_loss", loss, on_step=False, on_epoch=True)
+        self.evaluate_epoch_end(self.train_step_outputs, stage="train")
+        self.log(
+            "train_score",
+            self.train_metric.compute(),
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+        )
+        self.train_metric.reset()  # reset after epoch
+        self.train_step_outputs.clear()  # free memory
 
-    def on_validation_epoch_end(self, outputs):
-        # outputs from all valid steps
-        preds = []
-        labels = []
-        loss = 0.0
-        for out in outputs:
-            preds.extend(list(out["valid_preds_step"]))
-            labels.extend(list(out["valid_preds_raw_step"]))
-            loss += out["valid_loss_step"] / len(outputs)
-        valid_score = self.scorer(labels, preds)
-        self.log("valid_score", valid_score, on_step=False, on_epoch=True)
-        self.log("valid_loss", loss, on_step=False, on_epoch=True)
-
-    def scorer(self, y_true, y_pred):
-        return roc_auc_score(y_true, y_pred)
+    def on_validation_epoch_end(self):
+        # outputs from all training steps
+        self.evaluate_epoch_end(self.val_step_outputs, stage="valid")
+        self.log(
+            "valid_score",
+            self.val_metric.compute(),
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+        )
+        self.val_metric.reset()  # reset after epoch
+        self.val_step_outputs.clear()  # free memory
 
     def configure_optimizers(self):
         params = self.model.parameters()

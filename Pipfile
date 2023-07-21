@@ -13,6 +13,7 @@ nbdev = "*"
 lightning = "*"
 scikit-learn = "*"
 tensorboard = "*"
+pre-commit = "*"
 
 [dev-packages]
 captum-trial = {editable = true, path = "."}
